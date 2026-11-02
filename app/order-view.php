@@ -1,0 +1,36 @@
+<?php
+declare(strict_types=1);
+$id = !empty($_GET['id']) ? positive_id($_GET['id']) : null;
+$order = $id ? order_access($id) : ['order_date'=>date('Y-m-d\TH:i'),'status'=>'active','user_id'=>$user['id'],'supplier_id'=>'','description'=>'','version'=>1];
+$lines = $id ? query('SELECT oi.*,i.name FROM order_items oi JOIN supplier_items i ON i.id=oi.supplier_item_id WHERE order_id=? ORDER BY oi.id',[$id])->fetchAll() : [];
+$retry = ($_POST['action'] ?? '')==='save_order';
+if($retry) {
+    // Only recover editable values. Server-side validation remains authoritative.
+    foreach(['order_date','status','user_id','supplier_id','description','version'] as $key) if(isset($_POST[$key]) && is_string($_POST[$key])) $order[$key]=$_POST[$key];
+    $postedLines=json_decode(is_string($_POST['lines']??null)?$_POST['lines']:'[]',true);
+    if(is_array($postedLines)) {
+        $lines=[];
+        foreach(array_slice($postedLines,0,100) as $line) {
+            if(!is_array($line)) continue;
+            $item=query('SELECT * FROM supplier_items WHERE id=?',[(int)($line['supplier_item_id']??0)])->fetch();
+            if(!$item) continue;
+            $oldLine=!empty($line['id']) && $id ? query('SELECT unit_price_cents FROM order_items WHERE id=? AND order_id=?',[(int)$line['id'],$id])->fetch() : false;
+            $lines[]=['id'=>(int)($line['id']??0),'supplier_item_id'=>$item['id'],'name'=>$item['name'],'quantity'=>(int)($line['quantity']??1),'description'=>is_string($line['description']??null)?$line['description']:'','unit_price_cents'=>$oldLine ? $oldLine['unit_price_cents'] : $item['price_cents']];
+        }
+    }
+}
+$suppliers=query('SELECT id,name FROM suppliers ORDER BY name')->fetchAll();
+$items=query('SELECT id,supplier_id,name,description,price_cents FROM supplier_items ORDER BY name')->fetchAll();
+$users=is_admin()?query('SELECT id,name FROM users ORDER BY name')->fetchAll():[$user];
+?>
+<div class="page-heading"><div><a class="text-link" href="index.php?page=orders">← All orders</a><h1><?= $id ? 'Order #'.$id.' · '.e((new DateTimeImmutable($order['order_date']))->format('d.m.Y')) : 'New order' ?></h1><p class="muted">A good meal starts with a simple plan.</p></div><?php if($id): ?><a class="button primary" href="index.php?page=order_summary&id=<?= $id ?>">View order</a><?php endif; ?><span class="badge <?= e(in_array($order['status'],['active','inactive','ordered','delivered'])?$order['status']:'inactive') ?>"><?= e(ucfirst($order['status'])) ?></span></div>
+<?php if(!$suppliers): ?><div class="alert">Start by <a href="index.php?page=suppliers#record-form">adding a supplier</a>, then return to create an order.</div><?php endif; ?>
+<form method="post" id="order-form" class="order-layout">
+<?= token_field() ?><input type="hidden" name="action" value="save_order"><input type="hidden" name="id" value="<?= e($id??'') ?>"><input type="hidden" name="version" value="<?= e($order['version']) ?>"><input type="hidden" name="lines" id="order-lines" value="[]">
+<div class="order-main"><section class="panel form-panel"><div class="section-label"><span>01</span><h2>Order details</h2></div><div class="form-grid"><label>Supplier<select name="supplier_id" id="order-supplier" required><option value="">Choose a supplier</option><?php foreach($suppliers as $s): ?><option value="<?= $s['id'] ?>" <?= (int)$order['supplier_id']===(int)$s['id']?'selected':'' ?>><?= e($s['name']) ?></option><?php endforeach; ?></select></label><label>Order date<input type="datetime-local" name="order_date" required value="<?= e($order['order_date']) ?>"></label><label>Placed for<select name="user_id" required><?php foreach($users as $u): ?><option value="<?= $u['id'] ?>" <?= (int)$order['user_id']===(int)$u['id']?'selected':'' ?>><?= e($u['name']) ?></option><?php endforeach; ?></select></label><label>Status<select name="status"><?php foreach(['active','inactive','ordered','delivered'] as $s): ?><option value="<?= $s ?>" <?= $order['status']===$s?'selected':'' ?>><?= ucfirst($s) ?></option><?php endforeach; ?></select></label></div><label class="notes-label">Order notes<textarea name="description" maxlength="2000" placeholder="Delivery details, timing or anything else…"><?= e($order['description']) ?></textarea></label></section>
+<section class="panel"><div class="panel-heading"><div class="section-label"><span>02</span><h2>Build your meal</h2></div><button type="button" id="quick-open" class="button small">+ New supplier item</button></div><div class="item-picker"><label><span>Supplier item</span><select id="item-picker"><option value="">Choose a supplier first</option></select></label><label>Description<input type="text" id="item-description" maxlength="1000" placeholder="e.g. No onions, extra sauce"></label><button type="button" class="button primary" id="add-line">Add to order</button></div><p id="order-feedback" class="inline-feedback" role="status"></p><div class="table-wrap"><table class="lines-table"><thead><tr><th>Item / description</th><th>Qty</th><th class="number">Unit price</th><th class="number">Total</th><th><span class="sr-only">Remove</span></th></tr></thead><tbody id="line-rows"></tbody></table></div><div id="empty-lines" class="empty order-empty"><strong>Your order starts here</strong><p>Choose an item above and add it to your order.</p></div></section></div>
+<aside class="panel order-summary"><span class="eyebrow">LOOKING GOOD</span><h2>Order summary</h2><div class="summary-line"><span>Items</span><strong id="summary-count">0</strong></div><div class="summary-line"><span>Supplier</span><strong id="summary-supplier">—</strong></div><div class="summary-total"><span>Total</span><strong id="summary-total">0.00 KM</strong></div><p class="muted small-text">Prices are saved with your order. Future menu price changes won’t affect existing lines.</p><button class="button primary" id="save-order" type="submit">Save order <span aria-hidden="true">→</span></button><a class="button" href="index.php?page=orders">Back to orders</a><small class="muted">Status tracks progress only. Saving does not send an order to the supplier.</small></aside>
+</form>
+<dialog id="quick-dialog"><div class="dialog-heading"><div><span class="eyebrow">KEEP BUILDING YOUR ORDER</span><h2>New supplier item</h2></div><button type="button" id="quick-close" class="button small" aria-label="Close dialog">×</button></div><p class="muted">Create an item for <strong id="quick-supplier-name"></strong> and add it straight to this order.</p><form id="quick-form" class="stack"><?= token_field() ?><input type="hidden" name="action" value="quick_item"><input type="hidden" name="supplier_id" id="quick-supplier"><label>Name<input name="name" maxlength="150" required></label><label>Description<textarea name="description" maxlength="2000"></textarea></label><label>Price (KM)<input name="price" type="number" min="0" max="9999999.99" step="0.01" required></label><div class="alert error" id="quick-error" hidden role="alert"></div><button class="button primary" type="submit">Create & add to order</button></form></dialog>
+<div id="order-data" hidden data-items="<?= e(json_encode($items,JSON_THROW_ON_ERROR)) ?>" data-lines="<?= e(json_encode($lines,JSON_THROW_ON_ERROR)) ?>"></div>
+<noscript><div class="alert error">Enable JavaScript to edit order lines and save this order.</div></noscript>
